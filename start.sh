@@ -1,49 +1,62 @@
-#!/usr/bin/env bash
+#!/usr/bin/env fish
 
-# Прерывать выполнение при ошибках
-set -e
-
-# Переход в директорию скрипта, чтобы его можно было вызывать откуда угодно
-cd "$(dirname "$0")"
+# Функция для проверки готовности базы данных
+function wait_for_db
+    echo "⏳ Ожидание инициализации базы данных..."
+    for i in (seq 1 30)
+        if pg_isready -h localhost -p 5432 -U user > /dev/null
+            echo "✅ База данных готова!"
+            return 0
+        end
+        echo "   (попытка $i/30...)"
+        sleep 1
+    end
+    echo "❌ Ошибка: База данных не отвечает после 30 секунд."
+    return 1
+end
 
 echo "=========================================="
 echo "🚀 Запуск проекта Nordpool..."
 echo "=========================================="
 
 # 1. Запуск базы данных
-if command -v docker-compose &> /dev/null; then
-    echo "📦 Запуск PostgreSQL через Docker Compose..."
-    docker-compose up -d
-elif command -v docker &> /dev/null && docker compose version &> /dev/null; then
-    echo "📦 Запуск PostgreSQL через Docker Compose (v2)..."
-    docker compose up -d
+if command -v docker > /dev/null
+    echo "📦 Запуск PostgreSQL через Docker..."
+    # Пробуем запустить в обычном режиме (bridge)
+    if not docker run --name nordpool-db -e POSTGRES_USER=user -e POSTGRES_PASSWORD=password -e POSTGRES_DB=nordpool_db -p 5432:5432 -d postgres:15-alpine 2>/dev/null
+        # Если не вышло (например, ошибка сети bridge), пробуем в режиме host
+        echo "⚠️  Ошибка запуска стандартной сети. Переход в режим --network host..."
+        docker rm -f nordpool-db > /dev/null
+        docker run --name nordpool-db -e POSTGRES_USER=user -e POSTGRES_PASSWORD=password -e POSTGRES_DB=nordpool_db --network host -d postgres:15-alpine
+    end
 else
-    echo "⚠️ Внимание: Docker или Docker Compose не найдены."
-    echo "Пожалуйста, убедитесь, что база данных запущена."
-fi
+    echo "⚠️  Внимание: Docker не найден."
+end
 
-echo "⏳ Ожидание инициализации базы данных..."
-sleep 3
+# Ожидание базы
+if not wait_for_db
+    exit 1
+end
 
 # 2. Виртуальное окружение
-if [ ! -d "venv" ]; then
-    echo "🛠️ Виртуальное окружение не найдено. Создание и установка зависимостей..."
+if not test -d "venv"
+    echo "🛠️  Создание виртуального окружения..."
     python3 -m venv venv
-    source venv/bin/activate
+    source venv/bin/activate.fish
     pip install -r requirements.txt
 else
     echo "🐍 Активация виртуального окружения..."
-    source venv/bin/activate
-fi
+    source venv/bin/activate.fish
+end
 
-# 3. Инициализация БД и загрузка данных
-echo "📥 Инициализация БД и загрузка свежих данных о ценах..."
+# 3. Инициализация и данные
+echo "📥 Обновление данных..."
 python3 main.py --init-db
 python3 main.py
 
 # 4. Запуск дашборда
 echo "=========================================="
 echo "📊 Запуск Streamlit Дашборда..."
-echo "Остановить: Ctrl+C"
 echo "=========================================="
 streamlit run dashboard.py
+
