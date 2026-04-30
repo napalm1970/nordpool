@@ -187,7 +187,12 @@ if min_db_ts:
         # The price line with color by day
         line = base.mark_line().encode(
             y=alt.Y('display_price:Q', title=f'Price ({price_unit})'),
-            color=alt.Color('date:O', title='Date', legend=alt.Legend(orient='bottom'))
+            color=alt.Color(
+                'date:O',
+                title='Date',
+                scale=alt.Scale(scheme='tableau10'),
+                legend=alt.Legend(orient='bottom')
+            )
         )
 
         # Selection for interactive vertical line (cursor)
