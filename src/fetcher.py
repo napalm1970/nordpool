@@ -2,28 +2,12 @@ import requests
 import logging
 from datetime import datetime, timedelta
 import pytz
-from requests.adapters import HTTPAdapter
-from urllib3.util import Retry
+from src.utils import get_retrying_session
 
 logger = logging.getLogger(__name__)
 
 # Elering API endpoint
 API_URL = "https://dashboard.elering.ee/api/nps/price"
-
-def get_retrying_session(retries=3, backoff_factor=0.3, status_forcelist=(500, 502, 504)):
-    """Creates a requests session with retry logic."""
-    session = requests.Session()
-    retry = Retry(
-        total=retries,
-        read=retries,
-        connect=retries,
-        backoff_factor=backoff_factor,
-        status_forcelist=status_forcelist,
-    )
-    adapter = HTTPAdapter(max_retries=retry)
-    session.mount('http://', adapter)
-    session.mount('https://', adapter)
-    return session
 
 def fetch_prices(start_dt=None, end_dt=None, region='EE'):
     """

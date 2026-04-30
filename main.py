@@ -2,8 +2,9 @@ import argparse
 import logging
 from datetime import datetime, timedelta
 import pytz
-from src.db import init_db, save_prices
+from src.db import init_db, init_weather_table, save_prices, save_weather_data
 from src.fetcher import fetch_prices
+from src.weather import fetch_weather_hourly, DEFAULT_LAT, DEFAULT_LON
 
 # Configure logging
 logging.basicConfig(
@@ -17,7 +18,7 @@ def main():
         description="Nordpool Electricity Price Fetcher for Estonia"
     )
     parser.add_argument(
-        "--init-db", action="store_true", help="Initialize the database table"
+        "--init-db", action="store_true", help="Initialize the database tables"
     )
     parser.add_argument(
         "--days",
@@ -31,16 +32,28 @@ def main():
     parser.add_argument(
         "--region", type=str, default="EE", help="Region code (default: EE)"
     )
+    parser.add_argument(
+        "--fetch-weather", action="store_true", help="Fetch weather data from Open-Meteo"
+    )
+    parser.add_argument(
+        "--lat", type=float, default=DEFAULT_LAT, help=f"Latitude for weather data (default: {DEFAULT_LAT})"
+    )
+    parser.add_argument(
+        "--lon", type=float, default=DEFAULT_LON, help=f"Longitude for weather data (default: {DEFAULT_LON})"
+    )
 
     args = parser.parse_args()
 
     if args.init_db:
         init_db()
+        init_weather_table()
+        logger.info("Database tables initialized.")
+        return
 
     # Determine date range
     if args.start_date:
         try:
-            base_dt = datetime.strptime(args.start_date, "%d-%m-%Y").replace(
+            base_dt = datetime.strptime(args.start_date, "%Y-%m-%d").replace(
                 tzinfo=pytz.utc
             )
             start_dt = base_dt
@@ -57,6 +70,20 @@ def main():
             hour=23, minute=59, second=59, microsecond=0
         )
 
+    # Fetch weather data if requested
+    if args.fetch_weather:
+        logger.info(f"Fetching weather data for lat={args.lat}, lon={args.lon}")
+        weather = fetch_weather_hourly(
+            start_dt=start_dt, end_dt=end_dt, lat=args.lat, lon=args.lon
+        )
+        if weather:
+            logger.info(f"Fetched {len(weather)} weather records.")
+            save_weather_data(weather)
+        else:
+            logger.warning("No weather data fetched.")
+        return
+
+    # Fetch electricity prices
     logger.info(f"Starting fetch for region {args.region} from {start_dt} to {end_dt}")
     prices = fetch_prices(start_dt=start_dt, end_dt=end_dt, region=args.region)
 

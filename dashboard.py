@@ -1,9 +1,10 @@
 import streamlit as st
 import pandas as pd
 import logging
-from src.db import get_connection
+from src.db import get_prices_with_weather, get_date_range as _get_date_range
 import altair as alt
 from dotenv import load_dotenv
+from src.weather import get_weather_icon
 
 # Load environment variables
 load_dotenv()
@@ -11,58 +12,21 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 
 @st.cache_data(ttl=3600)  # Cache for 1 hour
-def load_data(start_date=None, end_date=None):
-    """Fetches data from the database with optional date filtering."""
-    conn = get_connection()
-    if not conn:
+def load_data_with_weather(start_date=None, end_date=None):
+    """Fetches data from the database with weather data joined."""
+    df = get_prices_with_weather(start_date, end_date)
+    if df is None or df.empty:
         return pd.DataFrame()
-    
-    query = "SELECT timestamp, price, region FROM electricity_prices"
-    params = []
-    
-    if start_date and end_date:
-        query += " WHERE timestamp >= %s AND timestamp <= %s"
-        # Convert date to datetime to include the whole end day
-        start_dt = pd.Timestamp(start_date).replace(hour=0, minute=0, second=0)
-        end_dt = pd.Timestamp(end_date).replace(hour=23, minute=59, second=59)
-        params = [start_dt, end_dt]
-    elif start_date:
-        query += " WHERE timestamp >= %s"
-        start_dt = pd.Timestamp(start_date).replace(hour=0, minute=0, second=0)
-        params = [start_dt]
-    
-    query += " ORDER BY timestamp ASC"
-    
-    try:
-        import warnings
-        with warnings.catch_warnings():
-            warnings.filterwarnings("ignore", category=UserWarning, message=".*pandas only supports SQLAlchemy connectable.*")
-            df = pd.read_sql_query(query, conn, params=params)
-        return df
-    except Exception as e:
-        st.error(f"Error loading data: {e}")
-        logger.error(f"Database query error: {e}")
-        return pd.DataFrame()
-    finally:
-        conn.close()
+    return df
 
 # Page Config
 st.set_page_config(page_title="Nordpool Prices Estonia", layout="wide")
 
 st.title("💡 Electricity Prices (Estonia)")
 
-# --- Initial Data Load (to get min/max dates for range picker) ---
-# We still need min/max dates for the sidebar, but we'll fetch them efficiently
+@st.cache_data(ttl=3600)
 def get_date_range():
-    conn = get_connection()
-    if not conn:
-        return None, None
-    try:
-        with conn.cursor() as cur:
-            cur.execute("SELECT MIN(timestamp), MAX(timestamp) FROM electricity_prices")
-            return cur.fetchone()
-    finally:
-        conn.close()
+    return _get_date_range()
 
 min_db_ts, max_db_ts = get_date_range()
 
@@ -77,34 +41,39 @@ if min_db_ts:
     today = pd.Timestamp.now().date()
     default_start = today if min_db_date <= today <= max_db_date else min_db_date
     default_end = max_db_date
-    
-    date_range = st.sidebar.date_input(
-        "Select Date Range",
-        value=(default_start, default_end),
+
+    start_date_pick = st.sidebar.date_input(
+        "Start Date",
+        value=default_start,
         min_value=min_db_date,
         max_value=max_db_date,
         format="DD.MM.YYYY"
     )
 
-    # Determine start/end for SQL
-    if isinstance(date_range, tuple) and len(date_range) == 2:
-        start_date_pick, end_date_pick = date_range
-    else:
-        start_date_pick = date_range[0] if isinstance(date_range, (list, tuple)) else date_range
-        end_date_pick = max_db_date
+    end_date_pick = st.sidebar.date_input(
+        "End Date",
+        value=default_end,
+        min_value=min_db_date,
+        max_value=max_db_date,
+        format="DD.MM.YYYY"
+    )
 
-    # Load Data with SQL filtering
-    df = load_data(start_date_pick, end_date_pick)
+    date_range = (start_date_pick, end_date_pick)
+
+    # Refresh button
+    if st.sidebar.button("🔄 Refresh Data"):
+        st.cache_data.clear()
+        st.rerun()
+
+    # Load Data with SQL filtering (includes weather data)
+    df = load_data_with_weather(start_date_pick, end_date_pick)
     
     if df.empty:
         st.info("No data found for the selected range.")
         st.stop()
 
     df['timestamp'] = pd.to_datetime(df['timestamp'])
-    
-    # Sidebar filters
-    st.sidebar.header("Settings")
-    
+
     # Timezone selection
     timezone_option = st.sidebar.selectbox(
         "Timezone",
@@ -178,18 +147,19 @@ if min_db_ts:
         max_idx = filtered_df['display_price'].idxmax()
         max_row = filtered_df.loc[max_idx]
         max_price = max_row['display_price']
-        max_time = max_row['timestamp'].strftime('%H:%M')
+        max_time = max_row['timestamp'].strftime('%d.%m %H:%M')
         
         min_idx = filtered_df['display_price'].idxmin()
         min_row = filtered_df.loc[min_idx]
         min_price = min_row['display_price']
-        min_time = min_row['timestamp'].strftime('%H:%M')
+        min_time = min_row['timestamp'].strftime('%d.%m %H:%M')
         
         st.subheader(f"Key Metrics ({price_unit})")
         col1, col2, col3, col4 = st.columns(4)
         
         with col1:
-            st.metric(price_label, f"{current_price:.2f} {price_unit}")
+            price_delta = current_price - avg_price
+            st.metric(price_label, f"{current_price:.2f} {price_unit}", delta=f"{price_delta:+.2f} vs avg", delta_color="inverse")
             
         with col2:
             st.metric("Average Price", f"{avg_price:.2f} {price_unit}")
@@ -202,19 +172,22 @@ if min_db_ts:
         
         # Prepare chart data
         chart_df = filtered_df.copy()
-        now_dt = pd.Timestamp.now(tz='UTC')
+
+        # Add date column for color grouping by day (as string for proper legend)
+        chart_df['date'] = chart_df['timestamp'].dt.strftime('%d.%m.%y')
 
         # Chart
         st.subheader(f"Price History ({price_unit})")
-        
+
         # Base chart for the line
         base = alt.Chart(chart_df).encode(
-            x=alt.X('timestamp:T', title='Time', axis=alt.Axis(format='%d.%m.%Y %H:%M'), scale=alt.Scale(nice=True))
+            x=alt.X('timestamp:T', title='Time', axis=alt.Axis(format='%d.%m.%y %H:%M'), scale=alt.Scale(nice=True))
         )
 
-        # The price line
+        # The price line with color by day
         line = base.mark_line().encode(
-            y=alt.Y('display_price:Q', title=f'Price ({price_unit})')
+            y=alt.Y('display_price:Q', title=f'Price ({price_unit})'),
+            color=alt.Color('date:O', title='Date', legend=alt.Legend(orient='bottom'))
         )
 
         # Selection for interactive vertical line (cursor)
@@ -229,7 +202,7 @@ if min_db_ts:
         hover_rule = base.mark_rule(color='#aaaaaa', strokeWidth=1).encode(
             opacity=alt.condition(hover_selection, alt.value(0.5), alt.value(0)),
             tooltip=[
-                alt.Tooltip('timestamp:T', format='%d.%m.%Y %H:%M', title='Time'),
+                alt.Tooltip('timestamp:T', format='%d.%m.%y %H:%M', title='Time'),
                 alt.Tooltip('display_price:Q', format='.2f', title=f'Price ({price_unit})')
             ]
         ).add_params(hover_selection)
@@ -246,17 +219,101 @@ if min_db_ts:
             ).encode(x='now:T')
             layers.append(now_rule)
 
+        # Highlight top-5 cheapest hours
+        cheapest = chart_df.nsmallest(5, 'display_price')
+        cheap_points = alt.Chart(cheapest).mark_point(
+            size=80, color='green', filled=True
+        ).encode(
+            x='timestamp:T',
+            y='display_price:Q',
+            tooltip=[
+                alt.Tooltip('timestamp:T', format='%d.%m.%y %H:%M', title='Time'),
+                alt.Tooltip('display_price:Q', format='.2f', title=f'Price ({price_unit})')
+            ]
+        )
+        layers.append(cheap_points)
+
         # Combine layers
         final_chart = alt.layer(*layers).properties(height=450)
-        
+
         st.altair_chart(final_chart, use_container_width=True)
-        
+
+        # Weather chart (if data available)
+        if 'temperature' in chart_df.columns and chart_df['temperature'].notna().any():
+            st.subheader("Weather Conditions")
+            
+            # Add weather icons
+            chart_df['weather_icon'] = chart_df['weather_code'].apply(
+                lambda x: get_weather_icon(x) if pd.notna(x) else '❓'
+            )
+            
+            # Temperature chart
+            temp_base = alt.Chart(chart_df).encode(
+                x=alt.X('timestamp:T', title='Time', axis=alt.Axis(format='%d.%m.%y %H:%M'))
+            )
+
+            temp_line = temp_base.mark_line(color='orange').encode(
+                y=alt.Y('temperature:Q', title='Temperature (°C)', scale=alt.Scale(zero=False))
+            )
+
+            temp_hover = alt.selection_point(
+                fields=['timestamp'],
+                nearest=True,
+                on='mouseover',
+                empty=False,
+            )
+
+            temp_rule = temp_base.mark_rule(color='#aaaaaa', strokeWidth=1).encode(
+                opacity=alt.condition(temp_hover, alt.value(0.5), alt.value(0)),
+                tooltip=[
+                    alt.Tooltip('timestamp:T', format='%d.%m.%y %H:%M', title='Time'),
+                    alt.Tooltip('temperature:Q', format='.1f', title='Temp (°C)'),
+                    alt.Tooltip('humidity:Q', format='.0f', title='Humidity (%)'),
+                    alt.Tooltip('wind_speed:Q', format='.1f', title='Wind (km/h)'),
+                ]
+            ).add_params(temp_hover)
+
+            temp_chart = alt.layer(temp_line, temp_rule).properties(height=300)
+
+            st.altair_chart(temp_chart, use_container_width=True)
+            
+            # Weather summary metrics
+            if chart_df['temperature'].notna().any():
+                temp_avg = chart_df['temperature'].mean()
+                temp_max = chart_df['temperature'].max()
+                temp_min = chart_df['temperature'].min()
+                humidity_avg = chart_df['humidity'].mean() if 'humidity' in chart_df.columns else 0
+                wind_avg = chart_df['wind_speed'].mean() if 'wind_speed' in chart_df.columns else 0
+                
+                st.subheader("Weather Summary")
+                wcol1, wcol2, wcol3, wcol4 = st.columns(4)
+                with wcol1:
+                    st.metric("Avg Temperature", f"{temp_avg:.1f}°C")
+                with wcol2:
+                    st.metric("Max Temperature", f"{temp_max:.1f}°C")
+                with wcol3:
+                    st.metric("Avg Humidity", f"{humidity_avg:.0f}%")
+                with wcol4:
+                    st.metric("Avg Wind Speed", f"{wind_avg:.1f} km/h")
+
         # Data Table with 24h formatting
         with st.expander("Show Raw Data"):
-            # Format for display
             display_df = filtered_df.copy()
-            display_df['timestamp'] = display_df['timestamp'].dt.strftime('%d.%m.%Y %H:%M')
-            st.dataframe(display_df, width='stretch')
+            display_df['timestamp'] = display_df['timestamp'].dt.strftime('%d.%m.%y %H:%M')
+            if 'weather_code' in display_df.columns:
+                display_df['weather'] = display_df['weather_code'].apply(
+                    lambda x: get_weather_icon(x) if pd.notna(x) else '❓'
+                )
+            st.dataframe(display_df, use_container_width=True)
+
+            csv_df = filtered_df.copy()
+            csv_df['timestamp'] = csv_df['timestamp'].dt.strftime('%Y-%m-%d %H:%M')
+            st.download_button(
+                label="Download CSV",
+                data=csv_df.to_csv(index=False).encode('utf-8'),
+                file_name='nordpool_prices.csv',
+                mime='text/csv'
+            )
             
     else:
         st.warning("No data available for the selected period.")
