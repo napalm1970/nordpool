@@ -8,16 +8,28 @@ logger = logging.getLogger(__name__)
 
 load_dotenv()
 
+def _get_database_url():
+    """Returns DATABASE_URL from Streamlit Secrets (cloud) or .env (local)."""
+    try:
+        import streamlit as st
+        return st.secrets["database"]["DATABASE_URL"]
+    except Exception:
+        return os.getenv("DATABASE_URL")
+
 def get_connection():
     """Establishes a connection to the PostgreSQL database."""
     try:
-        conn = psycopg2.connect(
-            dbname=os.getenv("DB_NAME"),
-            user=os.getenv("DB_USER"),
-            password=os.getenv("DB_PASSWORD"),
-            host=os.getenv("DB_HOST"),
-            port=os.getenv("DB_PORT")
-        )
+        database_url = _get_database_url()
+        if database_url:
+            conn = psycopg2.connect(database_url)
+        else:
+            conn = psycopg2.connect(
+                dbname=os.getenv("DB_NAME"),
+                user=os.getenv("DB_USER"),
+                password=os.getenv("DB_PASSWORD"),
+                host=os.getenv("DB_HOST"),
+                port=os.getenv("DB_PORT"),
+            )
         return conn
     except psycopg2.Error as e:
         logger.error(f"Error connecting to database: {e}")
