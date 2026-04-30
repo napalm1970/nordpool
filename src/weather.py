@@ -27,7 +27,12 @@ def fetch_weather_hourly(start_dt=None, end_dt=None, lat=DEFAULT_LAT, lon=DEFAUL
     if not start_dt:
         start_dt = datetime.now(pytz.utc) - timedelta(days=1)
     if not end_dt:
-        end_dt = datetime.now(pytz.utc) + timedelta(days=1)
+        end_dt = datetime.now(pytz.utc)
+
+    # Forecast API supports max 16 days ahead — cap to today
+    today = datetime.now(pytz.utc).replace(hour=23, minute=59, second=59)
+    if end_dt > today:
+        end_dt = today
 
     start_str = start_dt.strftime('%Y-%m-%d')
     end_str = end_dt.strftime('%Y-%m-%d')

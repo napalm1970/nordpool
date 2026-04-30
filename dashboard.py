@@ -299,12 +299,29 @@ if min_db_ts:
         # Data Table with 24h formatting
         with st.expander("Show Raw Data"):
             display_df = filtered_df.copy()
-            display_df['timestamp'] = display_df['timestamp'].dt.strftime('%d.%m.%y %H:%M')
             if 'weather_code' in display_df.columns:
                 display_df['weather'] = display_df['weather_code'].apply(
                     lambda x: get_weather_icon(x) if pd.notna(x) else '❓'
                 )
-            st.dataframe(display_df, use_container_width=True)
+            st.dataframe(
+                display_df,
+                use_container_width=True,
+                column_config={
+                    "timestamp": st.column_config.DatetimeColumn(
+                        "Time", format="DD.MM.YY HH:mm", width="medium"
+                    ),
+                    "price": st.column_config.NumberColumn("Price (€/MWh)", format="%.4f", width="small"),
+                    "display_price": st.column_config.NumberColumn(f"Price ({price_unit})", format="%.4f", width="small"),
+                    "temperature": st.column_config.NumberColumn("Temp (°C)", format="%.1f", width="small"),
+                    "humidity": st.column_config.NumberColumn("Humidity (%)", format="%.0f", width="small"),
+                    "wind_speed": st.column_config.NumberColumn("Wind (km/h)", format="%.1f", width="small"),
+                    "wind_direction": st.column_config.NumberColumn("Wind Dir", format="%d°", width="small"),
+                    "weather_code": st.column_config.NumberColumn("Code", width="small"),
+                    "weather": st.column_config.TextColumn("Weather", width="small"),
+                    "region": st.column_config.TextColumn("Region", width="small"),
+                    "date": st.column_config.TextColumn("Date", width="small"),
+                },
+            )
 
             csv_df = filtered_df.copy()
             csv_df['timestamp'] = csv_df['timestamp'].dt.strftime('%Y-%m-%d %H:%M')
